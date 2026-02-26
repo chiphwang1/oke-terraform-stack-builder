@@ -39,6 +39,7 @@ This skill only consults the following authoritative sources:
 - [terraform-oci-oke](https://github.com/oracle-terraform-modules/terraform-oci-oke) — Official OKE Terraform module
 - [oci-hpc-oke](https://github.com/oracle-quickstart/oci-hpc-oke) — HPC/GPU OKE quickstart
 - [terraform-provider-oci](https://github.com/oracle/terraform-provider-oci) — OCI Terraform provider
+- [OKE Documentation](https://docs.oracle.com/en-us/iaas/Content/ContEng/home.htm) — Oracle Container Engine official docs
 
 ## Installation
 

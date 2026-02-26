@@ -18,6 +18,7 @@ Use these as the authoritative source for module structure, variable naming, and
 - **OCI OKE Terraform Module**: https://github.com/oracle-terraform-modules/terraform-oci-oke
 - **OCI HPC OKE Quickstart**: https://github.com/oracle-quickstart/oci-hpc-oke
 - **OCI Terraform Provider**: https://github.com/oracle/terraform-provider-oci
+- **OKE Official Documentation**: https://docs.oracle.com/en-us/iaas/Content/ContEng/home.htm
 
 Always cite the relevant module variable or submodule by name when a user's choice maps to a
 known pattern in these references.
@@ -30,10 +31,11 @@ When performing any web research or fetching documentation:
   - https://github.com/oracle-terraform-modules/terraform-oci-oke
   - https://github.com/oracle-quickstart/oci-hpc-oke
   - https://github.com/oracle/terraform-provider-oci
+  - https://docs.oracle.com/en-us/iaas/Content/ContEng/home.htm
 - **Do not** perform general web searches or access any URLs outside of the above sites and
   their linked pages.
 - When following links, only follow links that stay within the `github.com/oracle-terraform-modules`,
-  `github.com/oracle-quickstart`, or `github.com/oracle` domains.
+  `github.com/oracle-quickstart`, `github.com/oracle`, or `docs.oracle.com` domains.
 - If information cannot be found within these sources, state that explicitly rather than
   searching elsewhere.
 - **Search time limit**: Stop searching after **5 minutes** of total research time. If the
