@@ -1,7 +1,6 @@
 ---
-name: oke-stack-builder
+name: oke-terraform-stack-builder
 description: Use this skill when the user asks to build, generate, create, design, or scaffold an OKE (Oracle Kubernetes Engine) Terraform stack, OCI Kubernetes infrastructure, ORM schema, or Resource Manager template. Trigger phrases include "build an OKE stack", "create OKE Terraform", "generate ORM schema", "deploy OKE cluster", "OKE infrastructure", "terraform-oci-oke", or any request to design OCI Kubernetes infrastructure with Terraform.
-version: 1.0.0
 ---
 
 # OKE Terraform Stack Builder
@@ -22,6 +21,32 @@ Use these as the authoritative source for module structure, variable naming, and
 
 Always cite the relevant module variable or submodule by name when a user's choice maps to a
 known pattern in these references.
+
+## OCI CLI Integration
+
+Use the `Bash` tool to run OCI CLI commands against the user's tenancy to populate choices
+with real data instead of hardcoded defaults. This turns the questionnaire into a live
+inventory of what actually exists and is available in their tenancy.
+
+| Phase | CLI purpose |
+|-------|-------------|
+| Pre-flight | Verify CLI auth, discover tenancy OCID + home region, list compartments |
+| Domain 1 | Fetch supported OKE Kubernetes versions for the target region |
+| Domain 2 | List existing VCNs when the user chooses to reuse one |
+| Domain 3 | List available compute shapes; check service limits for GPU/HPC shapes |
+| Domain 5 | List OCI Vault instances and keys when BYOK encryption is chosen |
+| Domain 6 | List available OKE managed add-ons for the chosen Kubernetes version |
+
+**Assumptions:**
+- The OCI CLI is installed (`oci --version` succeeds).
+- `~/.oci/config` is configured with at least one profile (default or named).
+- The authenticated principal has read access to IAM, CE (Container Engine), Compute,
+  Network, KMS, and Limits in the target compartment.
+
+**Error handling:**
+- If a CLI command fails (non-zero exit or empty output), note the error to the user,
+  fall back to free-text input for that field, and continue with the questionnaire.
+- Never abort the entire skill because a single CLI call fails.
 
 ## Web Research Constraints
 
@@ -64,6 +89,72 @@ When performing any web research or fetching documentation:
   "New VCN" is chosen).
 - After each domain, display a **summary table** of all answers and ask the user to confirm
   (Yes / Revise) before moving to the next domain.
+- **Use the `Bash` tool to run OCI CLI commands** whenever real tenancy data can improve a
+  question (e.g., list actual compartments, real K8s versions, available shapes). Always
+  run the CLI call *before* presenting the `AskUserQuestion` so options reflect live data.
+- **Parse CLI JSON output** with `--query` JMESPath expressions or `| python3 -c` to extract
+  only the fields needed (name, OCID, state). Never dump raw JSON to the user.
+
+---
+
+## Pre-flight: Tenancy Discovery
+
+Run these steps **once** before starting Phase 1. They establish the tenancy context that
+all subsequent CLI calls depend on.
+
+### Step 1 — Verify OCI CLI and authentication
+
+```bash
+oci --version
+oci iam region-subscription list --output table
+```
+
+If either command fails, tell the user:
+> "The OCI CLI does not appear to be installed or configured. Please run `oci setup config`
+> and re-invoke the skill. Alternatively, you can continue without CLI integration and
+> enter OCIDs manually."
+
+Then ask whether to continue without CLI or abort.
+
+### Step 2 — Discover tenancy OCID and home region
+
+```bash
+oci iam region-subscription list --output json \
+  --query 'data[?"is-home-region"==`true`].{"region":"region-name","tenancy-id":"tenancy-id"}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['region'], d[0]['tenancy-id'])"
+```
+
+Store the returned values as `TENANCY_OCID` and `HOME_REGION` for use in later CLI calls.
+Display them to the user for confirmation:
+> "Detected tenancy: `<TENANCY_OCID>` | Home region: `<HOME_REGION>`"
+
+### Step 3 — List available regions and ask which to deploy into
+
+```bash
+oci iam region-subscription list \
+  --query 'data[*].{"region":"region-name","status":"status"}' \
+  --output table
+```
+
+Use `AskUserQuestion` to let the user pick their target deployment region from the
+subscribed regions returned. Map the selected region name to the `region` Terraform variable.
+
+### Step 4 — List compartments and ask which to deploy into
+
+```bash
+oci iam compartment list \
+  --compartment-id "$TENANCY_OCID" \
+  --compartment-id-in-subtree true \
+  --all \
+  --lifecycle-state ACTIVE \
+  --query 'data[*].{Name:name,OCID:id,Path:"compartment-id"}' \
+  --output json
+```
+
+Parse the output and use `AskUserQuestion` to present the compartment names as options.
+Include the root tenancy compartment as the first option. Store the selected OCID as
+`COMPARTMENT_OCID` for use in all subsequent CLI calls and as the `compartment_ocid`
+Terraform variable.
 
 ---
 
@@ -74,7 +165,18 @@ answers and ask for confirmation before proceeding.
 
 ### Domain 1 — Cluster Fundamentals
 
-Use a single `AskUserQuestion` call with all 4 questions (they are independent):
+**CLI step** — Fetch the Kubernetes versions actually supported in the target region:
+
+```bash
+oci ce cluster-options get --cluster-option-id all \
+  --query 'data."kubernetes-versions"' \
+  --output json
+```
+
+Use the returned list to populate the K8s version question. Mark the last (highest) version
+as "Latest GA (Recommended)". Fall back to the static list below if the command fails.
+
+Then use a single `AskUserQuestion` call with all 4 questions (they are independent):
 
 ```
 Question 1 — Workload type
@@ -91,7 +193,8 @@ Question 1 — Workload type
 
 Question 2 — Kubernetes version
   header: "K8s Version"
-  options:
+  options: [populate from CLI output, up to 4 most recent versions; add "Other (specify)" as last option]
+  Static fallback options if CLI fails:
     - label: "v1.32 (Latest GA)"
       description: "Recommended — newest OKE-supported release with the longest support window."
     - label: "v1.31"
@@ -160,8 +263,19 @@ Question 3 — Bastion / operator access
 - "Pod CIDR? (default: `10.244.0.0/16`)"
 - "Service CIDR? (default: `10.96.0.0/16`)"
 
-If "Use existing VCN" was selected, ask via free text:
-- "Existing VCN OCID?"
+If "Use existing VCN" was selected, run the CLI to list VCNs, then use `AskUserQuestion`:
+
+```bash
+oci network vcn list \
+  --compartment-id "$COMPARTMENT_OCID" \
+  --lifecycle-state AVAILABLE \
+  --query 'data[*].{Name:"display-name",OCID:id,CIDR:"cidr-block"}' \
+  --output json
+```
+
+Present each VCN as an option: `label = Name`, `description = "CIDR: <cidr> | OCID: <ocid>"`.
+Store the selected OCID as `existing_vcn_ocid`. If the CLI returns no VCNs or fails, fall
+back to free text: "Enter the existing VCN OCID."
 
 **Step 3** — Use `AskUserQuestion` with 2 questions:
 
@@ -192,6 +306,29 @@ Question 2 — Additional interfaces (only ask if workload is AI-ML or HPC)
 ### Domain 3 — Node Pools
 
 **Step 1** — Ask via free text: "How many node pools do you need? (enter a number)"
+
+**CLI step** — Fetch all shapes available in the compartment, then filter by family for use
+in Step 2. Run once before looping over node pools:
+
+```bash
+# All available shapes
+oci compute shape list \
+  --compartment-id "$COMPARTMENT_OCID" \
+  --query 'data[*].shape' \
+  --output json
+
+# GPU shapes specifically (flag quota warnings)
+oci limits value list \
+  --compartment-id "$TENANCY_OCID" \
+  --service-name compute \
+  --all \
+  --query 'data[?contains(name, `gpu`) || contains(name, `hpc`) || contains(name, `rdma`)]' \
+  --output json
+```
+
+If any GPU/HPC quota value is `0`, warn the user:
+> "Warning: Your tenancy shows 0 quota for [shape family]. You will need a service limit
+> increase before provisioning these nodes."
 
 For **each** node pool, repeat the following steps:
 
@@ -326,16 +463,57 @@ Question 4 — Volume encryption
       description: "OCI encrypts volumes automatically with Oracle-managed keys; simpler setup."
 ```
 
-If "Customer-managed key (BYOK)" is selected, follow up with free text: "Enter the KMS key OCID."
+If "Customer-managed key (BYOK)" is selected, run the CLI to list vaults and keys, then
+use `AskUserQuestion` instead of free text:
+
+```bash
+# List vaults in the compartment
+oci kms management vault list \
+  --compartment-id "$COMPARTMENT_OCID" \
+  --lifecycle-state ACTIVE \
+  --query 'data[*].{Name:"display-name",OCID:id,Endpoint:"management-endpoint"}' \
+  --output json
+```
+
+Use `AskUserQuestion` to let the user pick a vault. Then fetch keys from the selected vault:
+
+```bash
+# List AES keys in the chosen vault (suitable for volume encryption)
+oci kms management key list \
+  --compartment-id "$COMPARTMENT_OCID" \
+  --endpoint "$VAULT_MANAGEMENT_ENDPOINT" \
+  --protection-mode HSM \
+  --algorithm AES \
+  --lifecycle-state ENABLED \
+  --query 'data[*].{Name:"display-name",OCID:id}' \
+  --output json
+```
+
+Present keys as `AskUserQuestion` options: `label = Name`, `description = "OCID: <ocid>"`.
+Store the selected OCID as `kms_key_id`. Fall back to free text if the CLI call fails.
 
 ### Domain 6 — Add-ons & Observability
+
+**CLI step** — Fetch the add-ons available for the chosen Kubernetes version (Enhanced clusters
+only). Run before presenting the add-ons question:
+
+```bash
+oci ce addon-option list \
+  --kubernetes-version "$KUBERNETES_VERSION" \
+  --query 'data[*].{Name:name,Description:description}' \
+  --output json
+```
+
+Use the returned add-on names and descriptions to populate the multiSelect options below.
+Fall back to the static list if the command fails or returns no results.
 
 Use `AskUserQuestion` with 2–3 questions:
 
 ```
 Question 1 — OKE managed add-ons (multiSelect: true; only for Enhanced clusters)
   header: "OKE Add-ons"
-  options:
+  options: [populate from CLI output; static fallback below]
+  Static fallback options:
     - label: "CoreDNS"
       description: "Cluster DNS — always required; managed version receives automatic patch updates."
     - label: "Kube-proxy"
