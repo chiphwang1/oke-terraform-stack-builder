@@ -1,6 +1,48 @@
 ---
 name: oke-terraform-stack-builder
 description: Use this skill when the user asks to build, generate, create, design, or scaffold an OKE (Oracle Kubernetes Engine) Terraform stack, OCI Kubernetes infrastructure, ORM schema, or Resource Manager template. Trigger phrases include "build an OKE stack", "create OKE Terraform", "generate ORM schema", "deploy OKE cluster", "OKE infrastructure", "terraform-oci-oke", or any request to design OCI Kubernetes infrastructure with Terraform.
+argument-hint: "[workload-type] [region]"
+---
+
+## Arguments Pre-fill
+
+If `$ARGUMENTS` is non-empty, parse it **before** starting Pre-flight to extract
+pre-filled answers. This lets users skip questions they already answered in the invocation.
+
+### Parsing Rules
+
+Split `$ARGUMENTS` on whitespace. Apply these rules in order:
+
+| Pattern | Matches when token... | Variable set |
+|---------|-----------------------|--------------|
+| `WORKLOAD_TYPE` | matches (case-insensitive): `ai`, `ai/ml`, `aiml`, `ml`, `gpu`, `hpc`, `microservices`, `general` | Set `WORKLOAD_TYPE`; skip Domain 1 Q1 |
+| `TARGET_REGION` | matches an OCI region pattern `<geo>-<city>-<number>` (e.g. `us-ashburn-1`) | Set `TARGET_REGION`; skip Pre-flight Step 3 region selection |
+| `CLUSTER_NAME` | any remaining token that doesn't match the above | Use as suggested `cluster_name`; confirm with user in Domain 1 |
+
+Canonical workload-type mappings:
+- `ai`, `ai/ml`, `aiml`, `ml`, `gpu` → `"AI / ML"`
+- `hpc`, `rdma` → `"HPC"`
+- `microservices`, `micro` → `"Microservices"`
+- anything else → `"General Purpose"`
+
+### Pre-fill Acknowledgment
+
+If any values were pre-filled from `$ARGUMENTS`, display this before Pre-flight begins:
+
+> "Detected from invocation: [list each pre-filled variable and its resolved value].
+> These answers are applied automatically — you can revise them at any domain summary."
+
+If `$ARGUMENTS` is empty, proceed with the full questionnaire.
+
+### Example Invocations
+
+| Invocation | Effect |
+|------------|--------|
+| `/oke-terraform-stack-builder` | Full questionnaire, no pre-fills |
+| `/oke-terraform-stack-builder ai/ml` | WORKLOAD_TYPE = "AI / ML" pre-filled |
+| `/oke-terraform-stack-builder hpc us-frankfurt-1` | WORKLOAD_TYPE = "HPC", TARGET_REGION pre-filled |
+| `/oke-terraform-stack-builder general us-ashburn-1 prod-cluster` | All three pre-filled |
+
 ---
 
 # OKE Terraform Stack Builder
@@ -24,48 +66,18 @@ known pattern in these references.
 
 ## OCI CLI Integration
 
-Use the `Bash` tool to run OCI CLI commands against the user's tenancy to populate choices
-with real data instead of hardcoded defaults. This turns the questionnaire into a live
-inventory of what actually exists and is available in their tenancy.
-
-| Phase | CLI purpose |
-|-------|-------------|
-| Pre-flight | Verify CLI auth, discover tenancy OCID + home region, list compartments |
-| Domain 1 | Fetch supported OKE Kubernetes versions for the target region |
-| Domain 2 | List existing VCNs when the user chooses to reuse one |
-| Domain 3 | List available compute shapes; check service limits for GPU/HPC shapes |
-| Domain 5 | List OCI Vault instances and keys when BYOK encryption is chosen |
-| Domain 6 | List available OKE managed add-ons for the chosen Kubernetes version |
-
-**Assumptions:**
-- The OCI CLI is installed (`oci --version` succeeds).
-- `~/.oci/config` is configured with at least one profile (default or named).
-- The authenticated principal has read access to IAM, CE (Container Engine), Compute,
-  Network, KMS, and Limits in the target compartment.
-
-**Error handling:**
-- If a CLI command fails (non-zero exit or empty output), note the error to the user,
-  fall back to free-text input for that field, and continue with the questionnaire.
-- Never abort the entire skill because a single CLI call fails.
+Use the `Bash` tool throughout the questionnaire to query the user's tenancy and populate
+`AskUserQuestion` options with real data (K8s versions, compartments, VCNs, shapes, vault
+keys, add-ons). Requires: OCI CLI installed, `~/.oci/config` configured, read access to
+IAM, CE, Compute, Network, KMS, and Limits. For failures, apply the CLI Fallback Pattern
+(see Behavioral Guidelines).
 
 ## Web Research Constraints
 
-When performing any web research or fetching documentation:
-
-- **Only access the following seed URLs and any links discovered within them:**
-  - https://github.com/oracle-terraform-modules/terraform-oci-oke
-  - https://github.com/oracle-quickstart/oci-hpc-oke
-  - https://github.com/oracle/terraform-provider-oci
-  - https://docs.oracle.com/en-us/iaas/Content/ContEng/home.htm
-- **Do not** perform general web searches or access any URLs outside of the above sites and
-  their linked pages.
-- When following links, only follow links that stay within the `github.com/oracle-terraform-modules`,
-  `github.com/oracle-quickstart`, `github.com/oracle`, or `docs.oracle.com` domains.
-- If information cannot be found within these sources, state that explicitly rather than
-  searching elsewhere.
-- **Search time limit**: Stop searching after **5 minutes** of total research time. If the
-  answer has not been found within that window, respond with: "I was unable to find a
-  definitive answer within the approved reference sources. I don't know."
+Only access these URLs and pages linked within them: the four Reference Modules listed
+above plus `docs.oracle.com`. Do not perform general web searches. If information is not
+found within 5 minutes of research, respond: "I was unable to find a definitive answer
+within the approved reference sources."
 
 ---
 
@@ -95,9 +107,57 @@ When performing any web research or fetching documentation:
 - **Parse CLI JSON output** with `--query` JMESPath expressions or `| python3 -c` to extract
   only the fields needed (name, OCID, state). Never dump raw JSON to the user.
 
+### CLI Fallback Pattern
+
+Whenever a `Bash` CLI call is used to populate question options, apply this standard
+procedure if the call fails (non-zero exit, empty output, or JSON parse error):
+
+1. Print informational text to the user (not an error):
+   > "Could not retrieve live [data-type] from your tenancy. Using the static list below."
+2. Present the static fallback options defined in `reference.md` for that domain, OR
+   switch to a free-text prompt if no static list applies.
+3. Set a session flag `CLI_[DOMAIN]_FALLBACK = true` (e.g. `CLI_K8S_FALLBACK`,
+   `CLI_VCN_FALLBACK`, `CLI_VAULT_FALLBACK`).
+4. Continue the questionnaire without interruption.
+
+In the Phase 2 Architecture Summary, if any `CLI_*_FALLBACK` flag is set, add:
+> "Note: Some values were entered manually because live tenancy discovery was unavailable."
+
+Never abort the skill because a single CLI call fails.
+
+### Session State Variables
+
+Track these variables across all domains. They are referenced in CLI calls, cross-domain
+conditions, and Phase 3 code generation.
+
+| Variable | Set in | Used in | Notes |
+|----------|--------|---------|-------|
+| `WORKLOAD_TYPE` | $ARGUMENTS or D1 Q1 | D2 Extra NICs gate, D3 shape defaults, D6 GPU gate | "AI / ML", "HPC", "Microservices", "General Purpose" |
+| `KUBERNETES_VERSION` | D1 Q2 | D6 add-on CLI call | e.g. `"v1.32.1"` |
+| `CLUSTER_TYPE` | D1 Q4 | D6 add-on gate, D5 workload identity gate | "Enhanced" or "Basic" |
+| `TARGET_REGION` | $ARGUMENTS or Pre-flight S3 | All CLI calls, `region` Terraform var | e.g. `"us-ashburn-1"` |
+| `TENANCY_OCID` | Pre-flight S2 | Pre-flight S4, D3 limits CLI | Root compartment OCID |
+| `HOME_REGION` | Pre-flight S2 | Display only | Tenancy home region |
+| `COMPARTMENT_OCID` | Pre-flight S4 | All subsequent CLI calls | Target compartment OCID → `compartment_ocid` |
+| `VCN_SOURCE` | D2 S1 Q1 | D2 S2 branching | `"new"` or `"existing"` |
+| `EXISTING_VCN_OCID` | D2 S2 existing path | `vcn_id` Terraform var | Only set if VCN_SOURCE = "existing" |
+| `CNI_TYPE` | D2 S1 Q2 | `cni_type` Terraform var | `"npn"` or `"flannel"` |
+| `RDMA_ROCE_SELECTED` | D2 S3 Q2 | D3 GPU/RDMA validation | `true` if RDMA/RoCE chosen |
+| `NODE_POOL_COUNT` | D3 S1 | D3 loop counter | Integer |
+| `POOL_SHAPE_i` | D3 S3 per pool | D6 GPU observability gate | Shape name for pool i |
+| `VAULT_MANAGEMENT_ENDPOINT` | D5 vault selection | D5 key list CLI | HTTPS management endpoint URL |
+| `KMS_KEY_ID` | D5 key selection | `kms_key_id` Terraform var | OCID of chosen AES key |
+| `WORKLOAD_IDENTITY_ENABLED` | D5 Q5 | `workload_identity_enabled` Terraform var | Enhanced clusters only |
+
+
 ---
 
 ## Pre-flight: Tenancy Discovery
+
+The following commands execute at skill load time to show OCI CLI status immediately:
+
+`!oci --version 2>&1 || echo "OCI CLI not installed"`
+`!oci iam region-subscription list --output table 2>&1 | head -6 || echo "OCI CLI auth not configured"`
 
 Run these steps **once** before starting Phase 1. They establish the tenancy context that
 all subsequent CLI calls depend on.
@@ -114,7 +174,10 @@ If either command fails, tell the user:
 > and re-invoke the skill. Alternatively, you can continue without CLI integration and
 > enter OCIDs manually."
 
-Then ask whether to continue without CLI or abort.
+Use `AskUserQuestion` to ask:
+- "Continue without CLI (enter OCIDs manually)" — proceed with the full questionnaire;
+  apply the CLI Fallback Pattern for every CLI-dependent step.
+- "Abort and configure CLI first" — stop the skill.
 
 ### Step 2 — Discover tenancy OCID and home region
 
@@ -194,15 +257,7 @@ Question 1 — Workload type
 Question 2 — Kubernetes version
   header: "K8s Version"
   options: [populate from CLI output, up to 4 most recent versions; add "Other (specify)" as last option]
-  Static fallback options if CLI fails:
-    - label: "v1.32 (Latest GA)"
-      description: "Recommended — newest OKE-supported release with the longest support window."
-    - label: "v1.31"
-      description: "Previous GA release; stable and widely tested on OKE."
-    - label: "v1.30"
-      description: "Older GA release; choose only if a specific dependency requires it."
-    - label: "Other (specify)"
-      description: "Enter a custom version string in the follow-up prompt."
+  Static fallback: Read reference.md § Static Kubernetes Versions and use that list.
 
 Question 3 — Control plane visibility
   header: "API Endpoint"
@@ -258,12 +313,12 @@ Question 3 — Bastion / operator access
       description: "No access infrastructure — suitable only for public API endpoints."
 ```
 
-**Step 2** — If "Create new VCN" was selected, ask via free text:
-- "VCN CIDR? (default: `10.0.0.0/16`)"
-- "Pod CIDR? (default: `10.244.0.0/16`)"
-- "Service CIDR? (default: `10.96.0.0/16`)"
+**Step 2** — Branch on the VCN source answer:
 
-If "Use existing VCN" was selected, run the CLI to list VCNs, then use `AskUserQuestion`:
+**If "Create new VCN"**, ask via free text:
+- "VCN CIDR? (default: `10.0.0.0/16`)"
+
+**If "Use existing VCN"**, run the CLI to list VCNs, then use `AskUserQuestion`:
 
 ```bash
 oci network vcn list \
@@ -274,8 +329,13 @@ oci network vcn list \
 ```
 
 Present each VCN as an option: `label = Name`, `description = "CIDR: <cidr> | OCID: <ocid>"`.
-Store the selected OCID as `existing_vcn_ocid`. If the CLI returns no VCNs or fails, fall
-back to free text: "Enter the existing VCN OCID."
+Store the selected OCID as `EXISTING_VCN_OCID`. If the CLI returns no VCNs or fails, apply
+the CLI Fallback Pattern (free-text mode): "Enter the existing VCN OCID."
+
+**Then, regardless of VCN source**, always ask via free text (these are Kubernetes-layer
+addresses required by the OKE module for both new and existing VCN configurations):
+- "Pod CIDR? (default: `10.244.0.0/16`) — mapped to `pods_cidr`. Must not overlap with the VCN CIDR."
+- "Service CIDR? (default: `10.96.0.0/16`) — mapped to `services_cidr`. Must not overlap with VCN or Pod CIDR."
 
 **Step 3** — Use `AskUserQuestion` with 2 questions:
 
@@ -290,8 +350,9 @@ Question 1 — Gateways (multiSelect: true)
     - label: "Internet Gateway"
       description: "Required only when subnets need direct inbound internet access."
 
-Question 2 — Additional interfaces (only ask if workload is AI-ML or HPC)
+Question 2 — Additional interfaces (only ask if WORKLOAD_TYPE is "AI / ML" or "HPC")
   header: "Extra NICs"
+  If "RDMA / RoCE" is selected, set session flag RDMA_ROCE_SELECTED = true.
   options:
     - label: "RDMA / RoCE"
       description: "High-speed RDMA networking for GPU-to-GPU communication. Requires BM.GPU or BM.HPC shapes."
@@ -330,7 +391,14 @@ If any GPU/HPC quota value is `0`, warn the user:
 > "Warning: Your tenancy shows 0 quota for [shape family]. You will need a service limit
 > increase before provisioning these nodes."
 
-For **each** node pool, repeat the following steps:
+For **each** node pool (1 through `NODE_POOL_COUNT`), repeat Steps 2–4. At the start of
+each iteration display:
+
+> "Configuring node pool **[i] of [NODE_POOL_COUNT]**"
+
+Then ask via free text: "Name for this pool? (e.g. `workers`, `gpu-pool`, `system`)"
+Store as `POOL_NAME_i`. After completing Steps 2–4, show a summary for this pool and
+confirm before advancing to pool i+1.
 
 **Step 2** — Use `AskUserQuestion` with 2 questions:
 
@@ -361,6 +429,20 @@ Question 2 — Scaling strategy
 - If Flex shape: "OCPUs per node? Memory (GB) per node?"
 - If Fixed count: "How many nodes?"
 - If Autoscaling: "Min nodes? Max nodes?"
+
+Store as `POOL_SHAPE_i`. Then apply cross-domain validation:
+
+1. If `RDMA_ROCE_SELECTED = true` AND the shape does **not** start with `BM.GPU` or `BM.HPC`:
+   > "Warning: RDMA/RoCE (selected in Domain 2) requires a Bare Metal GPU or HPC shape.
+   > `[shape]` is incompatible."
+   Use `AskUserQuestion` — options: "Change the shape", "Remove RDMA/RoCE from Domain 2", "Proceed anyway (not recommended)".
+
+2. If the shape contains `GPU`, `H100`, or `A100`, and `WORKLOAD_TYPE` is not "AI / ML" or "HPC":
+   > "Note: GPU shapes are typically used with AI/ML or HPC workloads. Your workload type
+   > is [WORKLOAD_TYPE]. Proceeding — let me know if you'd like to revise."
+
+3. If the quota check from the CLI step showed quota = 0 for this shape family, repeat
+   the quota warning.
 
 **Step 4** — Use `AskUserQuestion` with 3 questions:
 
@@ -423,7 +505,7 @@ Question 2 — Local NVMe (only ask if a DenseIO or BM.HPC shape was selected in
 
 ### Domain 5 — Security & Access
 
-Use `AskUserQuestion` with 4 questions:
+Use `AskUserQuestion` with 4 questions (plus a 5th for Workload Identity if Enhanced):
 
 ```
 Question 1 — Node identity
@@ -475,7 +557,13 @@ oci kms management vault list \
   --output json
 ```
 
-Use `AskUserQuestion` to let the user pick a vault. Then fetch keys from the selected vault:
+Use `AskUserQuestion` to let the user pick a vault. After the selection, **explicitly
+capture `VAULT_MANAGEMENT_ENDPOINT`**: extract the `Endpoint` field from the CLI output
+for the chosen vault and store it as `VAULT_MANAGEMENT_ENDPOINT`. If the vault list CLI
+failed and the user entered a vault OCID manually, ask via free text:
+"Enter the vault management endpoint URL (format: `https://<vault-ocid>-management.kms.<region>.oraclecloud.com`)."
+
+Then fetch keys from the selected vault:
 
 ```bash
 # List AES keys in the chosen vault (suitable for volume encryption)
@@ -490,9 +578,32 @@ oci kms management key list \
 ```
 
 Present keys as `AskUserQuestion` options: `label = Name`, `description = "OCID: <ocid>"`.
-Store the selected OCID as `kms_key_id`. Fall back to free text if the CLI call fails.
+Store the selected OCID as `KMS_KEY_ID`. If the CLI call fails, apply the CLI Fallback
+Pattern (free-text mode): "Enter the KMS key OCID."
+
+**Question 5 — Workload Identity** (only ask if `CLUSTER_TYPE = "Enhanced"`):
+
+```
+Question 5 — Workload Identity
+  header: "Workload Identity"
+  options:
+    - label: "Enable (Recommended for Enhanced)"
+      description: "Pods authenticate to OCI APIs using their Kubernetes service account identity.
+                    No OCI credentials needed in pods. Sets workload_identity_enabled = true."
+    - label: "Disable"
+      description: "Pods use node instance principals or manually distributed OCI credentials."
+```
+
+Store as `WORKLOAD_IDENTITY_ENABLED`.
 
 ### Domain 6 — Add-ons & Observability
+
+**Prerequisite check** — Before presenting any questions, check `CLUSTER_TYPE` from Domain 1:
+
+- If `CLUSTER_TYPE = "Basic"`: skip Question 1 (OKE managed add-ons) entirely and inform
+  the user: "Managed add-ons are only available on Enhanced clusters — skipping add-on
+  selection." Proceed directly to Question 2 (Observability).
+- If `CLUSTER_TYPE = "Enhanced"`: present all questions below as written.
 
 **CLI step** — Fetch the add-ons available for the chosen Kubernetes version (Enhanced clusters
 only). Run before presenting the add-ons question:
@@ -512,16 +623,7 @@ Use `AskUserQuestion` with 2–3 questions:
 ```
 Question 1 — OKE managed add-ons (multiSelect: true; only for Enhanced clusters)
   header: "OKE Add-ons"
-  options: [populate from CLI output; static fallback below]
-  Static fallback options:
-    - label: "CoreDNS"
-      description: "Cluster DNS — always required; managed version receives automatic patch updates."
-    - label: "Kube-proxy"
-      description: "Network proxy — always required; managed version receives automatic patch updates."
-    - label: "Cluster Autoscaler"
-      description: "Automatically scales node pools based on pending pod demand."
-    - label: "OCI Native Ingress Controller"
-      description: "Provisions OCI Load Balancers directly from Ingress resources; no NGINX required."
+  options: [populate from CLI output; static fallback: Read reference.md § Static OKE Managed Add-ons]
 
 Question 2 — Observability (multiSelect: true)
   header: "Observability"
@@ -595,89 +697,42 @@ Ask the user to confirm or revise before proceeding to code generation.
 
 ## Phase 3: Code Generation
 
-Generate all of the following artifacts. **Never omit required blocks or leave placeholder
-values that would cause `terraform plan` to fail.**
+Before generating any code:
+1. Read `reference.md` — use the Variable Mapping table to map every user answer to the
+   exact `terraform-oci-oke` module variable name.
+2. Read `templates/terraform.md` — use the `provider.tf`, `main.tf`, and `outputs.tf`
+   templates as the base structure.
+3. Read `templates/schema.md` — use the schema.yaml structure and conditional visibility
+   patterns.
+
+**Never omit required blocks or leave placeholder values that would cause `terraform plan`
+to fail. Remove any template lines that don't apply to this deployment.**
 
 ### 1. Terraform Stack
 
-#### `provider.tf`
-```hcl
-terraform {
-  required_version = ">= 1.3.0"
-  required_providers {
-    oci = {
-      source  = "oracle/oci"
-      version = ">= 5.0.0"
-    }
-  }
-}
+Generate these five files using the templates from `templates/terraform.md`:
 
-provider "oci" {
-  tenancy_ocid     = var.tenancy_ocid
-  user_ocid        = var.user_ocid
-  fingerprint      = var.fingerprint
-  private_key_path = var.private_key_path
-  region           = var.region
-}
-```
-
-#### `variables.tf`
-Declare all input variables with `type`, `description`, and `default` where appropriate.
-Group variables with comments matching the domain structure (Cluster, Networking, Node Pools,
-Storage, Security, Add-ons).
-
-#### `main.tf`
-Call the `terraform-oci-oke` module with all resolved variable bindings. Use the module's
-documented variable names exactly. Example structure:
-```hcl
-module "oke" {
-  source  = "oracle-terraform-modules/oke/oci"
-  version = "~> 5.0"
-
-  # Cluster
-  tenancy_id     = var.tenancy_ocid
-  compartment_id = var.compartment_ocid
-  region         = var.region
-  cluster_name   = var.cluster_name
-  kubernetes_version = var.kubernetes_version
-  cluster_type   = var.cluster_type
-  # ... all other resolved variables
-}
-```
-
-#### `outputs.tf`
-Include at minimum:
-- `cluster_id`
-- `kubeconfig_cmd` (the `oci ce cluster create-kubeconfig` command)
-- `node_pool_ids` (map of pool name → OCID)
-- `vcn_id`
-- `bastion_public_ip` (if applicable)
-- `operator_private_ip` (if applicable)
-
-#### `terraform.tfvars.example`
-Populated example values matching all declared variables, with comments explaining each.
+- **`provider.tf`** — Use the provider.tf template verbatim.
+- **`variables.tf`** — Declare all input variables with `type`, `description`, and `default`.
+  Group with comments matching the 7 domain structure.
+- **`main.tf`** — Use the module call template; populate all bindings from user answers
+  using `reference.md § Variable Mapping`. Remove commented-out lines that don't apply.
+- **`outputs.tf`** — Use the outputs.tf template; omit `bastion_public_ip` and
+  `operator_private_ip` if neither was provisioned.
+- **`terraform.tfvars.example`** — Populated example values for all declared variables,
+  with inline comments explaining each field.
 
 ### 2. ORM Schema (`schema.yaml`)
 
-Structure the schema with:
-- `title`, `description`, `schemaVersion: "1.1.0"`, `version`, `locale: "en"`
-- `logoUrl` placeholder
-- `variableGroups` matching the 7 domain structure
-- Per-variable: `title`, `description`, `required`, `default`, `pattern` (for CIDRs),
-  `enum` (for fixed-choice variables)
-- Conditional visibility: use `visible` expressions so GPU-specific fields only appear
-  when a GPU shape is selected; bastion fields only appear when control plane is private
-- Input validation: CIDR regex patterns, Kubernetes version format checks, allowed-values
-  constraints
+Use the structure, variable groups, conditional visibility patterns, and validation regex
+from `templates/schema.md`. Apply the audience filter from Domain 7:
 
-Example conditional visibility pattern:
-```yaml
-visible:
-  and:
-    - eq:
-        - ${control_plane_type}
-        - "private"
-```
+| Audience | Expose | Hide |
+|----------|--------|------|
+| Expert | All 6 variable groups | Nothing |
+| App team | Cluster Fundamentals only | Networking, Storage, Security, Add-ons |
+| Ops team | Cluster Fundamentals + Add-ons & Observability | Networking, Storage, Security |
+| Minimal | tenancy_ocid, compartment_ocid, region only | All others (set `required: false` with defaults) |
 
 ---
 
