@@ -1,0 +1,48 @@
+# Terraform state and backend
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Terraform crash logs
+crash.log
+crash.*.log
+
+# OCI credentials and keys
+*.pem
+*.key
+*.p12
+oci_api_key*
+private_key*
+
+# tfvars files (may contain secrets)
+*.tfvars
+!terraform.tfvars.example
+
+# Generated plan files
+*.tfplan
+*.plan
+
+# ORM zip packages
+*.zip
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code local files
+.claude/
