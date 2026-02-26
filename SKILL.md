@@ -53,6 +53,17 @@ When performing any web research or fetching documentation:
   volumes) unless the user explicitly requests otherwise.
 - Never generate incomplete Terraform that would cause a `plan` or `apply` to fail.
 - Present one domain at a time — summarize choices and confirm before moving to the next.
+- **Use the `AskUserQuestion` tool for every fixed-choice question.** Present options as
+  clickable choices with a short `label` and a `description` explaining the trade-off.
+  Use `multiSelect: true` when multiple items may apply (e.g., gateways, add-ons).
+  Reserve free-text follow-up only for values that require user-specific input such as
+  CIDRs, OCIDs, cluster names, or node counts.
+- You may batch up to **4 related questions** in a single `AskUserQuestion` call when they
+  are independent of each other. Split into separate calls when a later question depends
+  on the answer to an earlier one (e.g., ask VCN source first, then ask for CIDR only if
+  "New VCN" is chosen).
+- After each domain, display a **summary table** of all answers and ask the user to confirm
+  (Yes / Revise) before moving to the next domain.
 
 ---
 
@@ -63,82 +74,331 @@ answers and ask for confirmation before proceeding.
 
 ### Domain 1 — Cluster Fundamentals
 
-Ask:
-1. **Workload type** — General purpose / AI-ML / HPC / Microservices?
-   - *Why it matters*: Drives shape selection, CNI choice, and add-on defaults.
-2. **Kubernetes version** — Which version to target? (Recommend the latest OKE-supported GA release.)
-3. **Control plane visibility** — Public or private API endpoint?
-   - *Why it matters*: Private endpoints require a bastion or operator instance for `kubectl` access.
-4. **Cluster type** — Basic or Enhanced?
-   - *Why it matters*: Enhanced clusters unlock managed add-ons, virtual nodes, and workload identity.
+Use a single `AskUserQuestion` call with all 4 questions (they are independent):
+
+```
+Question 1 — Workload type
+  header: "Workload"
+  options:
+    - label: "General Purpose"
+      description: "Balanced compute for web apps, APIs, and mixed workloads."
+    - label: "AI / ML"
+      description: "GPU-accelerated training and inference; drives GPU shape and DCGM add-on defaults."
+    - label: "HPC"
+      description: "Bare-metal, low-latency RDMA/RoCE networking for tightly-coupled simulations."
+    - label: "Microservices"
+      description: "High-density, smaller VM shapes optimised for containerised services."
+
+Question 2 — Kubernetes version
+  header: "K8s Version"
+  options:
+    - label: "v1.32 (Latest GA)"
+      description: "Recommended — newest OKE-supported release with the longest support window."
+    - label: "v1.31"
+      description: "Previous GA release; stable and widely tested on OKE."
+    - label: "v1.30"
+      description: "Older GA release; choose only if a specific dependency requires it."
+    - label: "Other (specify)"
+      description: "Enter a custom version string in the follow-up prompt."
+
+Question 3 — Control plane visibility
+  header: "API Endpoint"
+  options:
+    - label: "Private (Recommended)"
+      description: "API server reachable only from within the VCN; requires bastion or operator for kubectl."
+    - label: "Public"
+      description: "API server has a public IP; simpler access but larger attack surface."
+
+Question 4 — Cluster type
+  header: "Cluster Type"
+  options:
+    - label: "Enhanced (Recommended)"
+      description: "Unlocks managed add-ons, virtual nodes, workload identity, and OCI Native Ingress."
+    - label: "Basic"
+      description: "Simpler setup; no managed add-ons or virtual nodes."
+```
+
+If the user selects **"Other (specify)"** for Kubernetes version, follow up with a free-text
+prompt: "Enter the Kubernetes version string (e.g. `v1.29.1`)."
 
 ### Domain 2 — Networking
 
-Ask:
-1. **VCN** — Create a new VCN or use an existing one?
-   - If new: What CIDR for the VCN? (Default: `10.0.0.0/16`)
-2. **Pod and service CIDRs** — What ranges for pods and services?
-   - (Defaults: pods `10.244.0.0/16`, services `10.96.0.0/16`)
-3. **CNI plugin** — VCN-Native Pod Networking (recommended for production) or Flannel?
-   - *Why it matters*: VCN-Native assigns real VCN IPs to pods, enabling security list rules and
-     native OCI Load Balancer integration. Maps to `cni_type` in terraform-oci-oke.
-4. **Additional interfaces** — Are SR-IOV, RDMA, or Multus multi-homed configurations needed?
-   - *Why it matters*: Required for GPU/HPC workloads using RDMA over RoCE or InfiniBand.
-5. **Gateways** — NAT gateway (for private nodes), service gateway, internet gateway?
-6. **Bastion / operator** — Is a bastion host or operator instance needed for private cluster access?
-   - Maps to `create_bastion` and `create_operator` in terraform-oci-oke.
+**Step 1** — Use `AskUserQuestion` with 3 independent questions:
+
+```
+Question 1 — VCN source
+  header: "VCN"
+  options:
+    - label: "Create new VCN"
+      description: "Terraform provisions a new VCN with subnets sized to your CIDRs."
+    - label: "Use existing VCN"
+      description: "Provide the OCID of an existing VCN; subnets will be created inside it."
+
+Question 2 — CNI plugin
+  header: "CNI"
+  options:
+    - label: "VCN-Native Pod Networking (Recommended)"
+      description: "Pods get real VCN IPs; enables OCI security lists and native Load Balancer integration. Sets cni_type = \"npn\"."
+    - label: "Flannel"
+      description: "Overlay network; simpler but pods are NAT'd — limits direct OCI service integration."
+
+Question 3 — Bastion / operator access
+  header: "Access"
+  options:
+    - label: "Bastion + Operator (Recommended for private)"
+      description: "Creates both a public bastion and a private operator instance for kubectl access."
+    - label: "Bastion only"
+      description: "Public bastion for SSH tunnelling; you manage kubectl from the bastion host."
+    - label: "Operator only"
+      description: "Private operator instance inside VCN; access via existing jump host."
+    - label: "None"
+      description: "No access infrastructure — suitable only for public API endpoints."
+```
+
+**Step 2** — If "Create new VCN" was selected, ask via free text:
+- "VCN CIDR? (default: `10.0.0.0/16`)"
+- "Pod CIDR? (default: `10.244.0.0/16`)"
+- "Service CIDR? (default: `10.96.0.0/16`)"
+
+If "Use existing VCN" was selected, ask via free text:
+- "Existing VCN OCID?"
+
+**Step 3** — Use `AskUserQuestion` with 2 questions:
+
+```
+Question 1 — Gateways (multiSelect: true)
+  header: "Gateways"
+  options:
+    - label: "NAT Gateway"
+      description: "Required for private nodes to reach the internet for image pulls and OCI APIs."
+    - label: "Service Gateway"
+      description: "Recommended — free, private access to OCI services (Object Storage, Registry)."
+    - label: "Internet Gateway"
+      description: "Required only when subnets need direct inbound internet access."
+
+Question 2 — Additional interfaces (only ask if workload is AI-ML or HPC)
+  header: "Extra NICs"
+  options:
+    - label: "RDMA / RoCE"
+      description: "High-speed RDMA networking for GPU-to-GPU communication. Requires BM.GPU or BM.HPC shapes."
+    - label: "SR-IOV"
+      description: "Single Root I/O Virtualisation for near line-rate networking on supported VM shapes."
+    - label: "Multus multi-homed"
+      description: "Multiple network interfaces per pod via the Multus CNI meta-plugin."
+    - label: "None"
+      description: "Standard single-interface networking."
+```
 
 ### Domain 3 — Node Pools
 
-Ask:
-1. **Number of node pools** — How many pools are needed?
+**Step 1** — Ask via free text: "How many node pools do you need? (enter a number)"
 
-For **each** node pool, ask:
-- **Shape** — e.g., `VM.Standard.E4.Flex`, `BM.GPU.H100.8`, `BM.HPC2.36`?
-  - Flag: GPU/HPC bare metal shapes require service limit increases and specific AD availability.
-- **Scaling** — Fixed node count, or autoscaling with min/max?
-  - Maps to `node_pool_size` or `autoscaler_*` variables.
-- **Boot volume** — Size (GB) and performance tier (Balanced / Higher Performance)?
-- **OS image** — OKE-optimized (recommended) or custom image OCID?
-- **Placement** — Specific fault domains or availability domains?
-- **Cloud-init** — Any custom startup scripts or cloud-init user data?
+For **each** node pool, repeat the following steps:
+
+**Step 2** — Use `AskUserQuestion` with 2 questions:
+
+```
+Question 1 — Shape family
+  header: "Shape Family"
+  options:
+    - label: "VM Standard (E4/E5 Flex)"
+      description: "General-purpose AMD VMs; flexible OCPUs and memory. Best for microservices and web workloads."
+    - label: "VM GPU (A10, A100)"
+      description: "GPU-equipped VMs for inference and moderate training. Requires service limit approval."
+    - label: "BM GPU (H100, A100)"
+      description: "Bare-metal GPU nodes for large-scale AI/ML training. Requires RDMA and service limit increases."
+    - label: "BM HPC (HPC2.36)"
+      description: "Bare-metal HPC nodes with RDMA networking for tightly-coupled simulations."
+
+Question 2 — Scaling strategy
+  header: "Scaling"
+  options:
+    - label: "Fixed count"
+      description: "Static node_pool_size; predictable cost, no autoscaler required."
+    - label: "Autoscaling (min / max)"
+      description: "OKE Cluster Autoscaler adjusts the pool size. You specify min and max node counts."
+```
+
+**Step 3** — Ask via free text for the selected shape:
+- "Enter the exact shape name (e.g. `VM.Standard.E4.Flex`, `BM.GPU.H100.8`)."
+- If Flex shape: "OCPUs per node? Memory (GB) per node?"
+- If Fixed count: "How many nodes?"
+- If Autoscaling: "Min nodes? Max nodes?"
+
+**Step 4** — Use `AskUserQuestion` with 3 questions:
+
+```
+Question 1 — Boot volume performance
+  header: "Boot Volume"
+  options:
+    - label: "Higher Performance (Recommended)"
+      description: "Higher IOPS and throughput; better container image pull times."
+    - label: "Balanced"
+      description: "Default OCI tier; lower cost, sufficient for light I/O workloads."
+
+Question 2 — OS image
+  header: "OS Image"
+  options:
+    - label: "OKE-optimised (Recommended)"
+      description: "Oracle-managed image with the correct kernel, containerd, and OKE agent pre-installed."
+    - label: "Custom image OCID"
+      description: "Bring your own image; you are responsible for OKE compatibility."
+
+Question 3 — Cloud-init / startup script
+  header: "Cloud-init"
+  options:
+    - label: "None"
+      description: "No custom startup script; use OKE defaults."
+    - label: "Inline script"
+      description: "Provide a short shell script to run on first boot (e.g. mount volumes, set kernel params)."
+    - label: "File path"
+      description: "Reference a local cloud-init YAML file to be embedded in the Terraform stack."
+```
+
+If "Custom image OCID" is selected, follow up with free text: "Enter the image OCID."
+If "Inline script" or "File path" is selected, follow up with free text for the content or path.
 
 ### Domain 4 — Storage
 
-Ask:
-1. **Persistent storage** — OCI Block Volume CSI / OCI File Storage (FSS) / Object Storage / None?
-2. **Local NVMe** — Are high-performance local NVMe drives needed?
-   - *Why it matters*: Certain shapes (e.g., `VM.DenseIO`) include local NVMe; requires specific
-     StorageClass configuration.
+Use `AskUserQuestion` with 2 questions:
+
+```
+Question 1 — Persistent storage backends (multiSelect: true)
+  header: "Storage"
+  options:
+    - label: "OCI Block Volume CSI"
+      description: "ReadWriteOnce PVCs backed by OCI Block Volumes; ideal for databases and stateful apps."
+    - label: "OCI File Storage (FSS)"
+      description: "ReadWriteMany PVCs backed by OCI FSS; required for shared-filesystem workloads."
+    - label: "Object Storage"
+      description: "S3-compatible access via rclone or s3fs; suitable for ML datasets and backups."
+    - label: "None"
+      description: "No persistent storage — stateless workloads only."
+
+Question 2 — Local NVMe (only ask if a DenseIO or BM.HPC shape was selected in Domain 3)
+  header: "Local NVMe"
+  options:
+    - label: "Yes — configure NVMe StorageClass"
+      description: "Provision a local-path StorageClass for the NVMe drives included with DenseIO shapes."
+    - label: "No"
+      description: "NVMe drives will not be configured as Kubernetes storage."
+```
 
 ### Domain 5 — Security & Access
 
-Ask:
-1. **Node identity** — Should node pools use managed node identity (instance principals)?
-2. **IAM policies** — Are specific IAM policies or dynamic groups required?
-3. **Pod security** — Should OCI Security Zones or Kubernetes Pod Security Admission be applied?
-4. **Encryption** — Should boot and block volumes be encrypted with a customer-managed key (BYOK)?
-   - Maps to `boot_volume_encryption_in_transit_enabled` and `kms_key_id` in terraform-oci-oke.
+Use `AskUserQuestion` with 4 questions:
+
+```
+Question 1 — Node identity
+  header: "Node Identity"
+  options:
+    - label: "Instance Principals (Recommended)"
+      description: "Nodes authenticate to OCI APIs via their instance identity — no credentials stored on disk."
+    - label: "User credentials"
+      description: "API key credentials stored as Kubernetes secrets; less secure, not recommended for production."
+
+Question 2 — IAM policies
+  header: "IAM Policies"
+  options:
+    - label: "Auto-generate (Recommended)"
+      description: "Terraform creates the required dynamic groups and policies for OKE, autoscaler, and add-ons."
+    - label: "Manual — I will create them"
+      description: "Skip IAM resource creation; you are responsible for pre-creating all required policies."
+
+Question 3 — Pod security
+  header: "Pod Security"
+  options:
+    - label: "Kubernetes Pod Security Admission (Recommended)"
+      description: "Enforce baseline or restricted pod security standards via the built-in K8s admission controller."
+    - label: "OCI Security Zones"
+      description: "OCI-level guardrails that prevent insecure resource configurations in the compartment."
+    - label: "Both"
+      description: "Apply both OCI Security Zones and Kubernetes PSA for defence-in-depth."
+    - label: "None"
+      description: "No additional pod security controls beyond Kubernetes RBAC."
+
+Question 4 — Volume encryption
+  header: "Encryption"
+  options:
+    - label: "Customer-managed key (BYOK)"
+      description: "Boot and block volumes encrypted with a key from OCI Vault. Sets kms_key_id and boot_volume_encryption_in_transit_enabled."
+    - label: "Oracle-managed key (Default)"
+      description: "OCI encrypts volumes automatically with Oracle-managed keys; simpler setup."
+```
+
+If "Customer-managed key (BYOK)" is selected, follow up with free text: "Enter the KMS key OCID."
 
 ### Domain 6 — Add-ons & Observability
 
-Ask:
-1. **OKE add-ons** — Which should be enabled?
-   - CoreDNS, kube-proxy, OCI VPA, Cluster Autoscaler, OCI Native Ingress Controller, etc.
-   - Maps to `cluster_addons` in terraform-oci-oke (Enhanced clusters only).
-2. **Observability** — OCI Logging, Monitoring, Container Insights?
-3. **GPU observability** — OCI GPU Scanner, DCGM exporter (Prometheus-compatible)?
-   - Flag: Recommend only when a GPU shape is selected in Domain 3.
+Use `AskUserQuestion` with 2–3 questions:
+
+```
+Question 1 — OKE managed add-ons (multiSelect: true; only for Enhanced clusters)
+  header: "OKE Add-ons"
+  options:
+    - label: "CoreDNS"
+      description: "Cluster DNS — always required; managed version receives automatic patch updates."
+    - label: "Kube-proxy"
+      description: "Network proxy — always required; managed version receives automatic patch updates."
+    - label: "Cluster Autoscaler"
+      description: "Automatically scales node pools based on pending pod demand."
+    - label: "OCI Native Ingress Controller"
+      description: "Provisions OCI Load Balancers directly from Ingress resources; no NGINX required."
+
+Question 2 — Observability (multiSelect: true)
+  header: "Observability"
+  options:
+    - label: "OCI Logging"
+      description: "Stream container stdout/stderr logs to OCI Logging service."
+    - label: "OCI Monitoring"
+      description: "Emit cluster and node metrics to OCI Monitoring for alerting and dashboards."
+    - label: "Container Insights"
+      description: "OCI Container Insights for deep pod- and namespace-level metrics."
+    - label: "None"
+      description: "No OCI-managed observability; bring your own stack (Prometheus, Loki, etc.)."
+
+Question 3 — GPU observability (only ask if a GPU shape was selected in Domain 3)
+  header: "GPU Metrics"
+  options:
+    - label: "DCGM Exporter (Recommended for GPU)"
+      description: "Deploys NVIDIA DCGM exporter as a DaemonSet; Prometheus-compatible GPU metrics."
+    - label: "OCI GPU Scanner"
+      description: "OCI-native GPU health scanning and telemetry."
+    - label: "Both"
+      description: "Deploy both DCGM exporter and OCI GPU Scanner for full coverage."
+    - label: "None"
+      description: "No GPU-specific observability."
+```
 
 ### Domain 7 — ORM Schema Preferences
 
-Ask:
-1. **Audience** — Should the ORM schema expose all variables (expert), or be simplified for
-   a specific audience (e.g., app team, ops team)?
-2. **Hidden vs. surfaced** — Which variables should be hidden with sensible defaults vs.
-   required as user inputs?
-3. **Schema features** — Should the schema include variable groupings, descriptions, help text,
-   and input validation rules (CIDR format checks, allowed-values lists)?
+Use `AskUserQuestion` with 2 questions:
+
+```
+Question 1 — Target audience
+  header: "ORM Audience"
+  options:
+    - label: "Expert — expose all variables"
+      description: "Every Terraform variable is surfaced in the ORM UI; suitable for infrastructure engineers."
+    - label: "App team — simplified view"
+      description: "Hide networking and security details; expose only cluster name, node count, and shape."
+    - label: "Ops team — operational controls"
+      description: "Surface scaling, add-ons, and observability variables; hide core network settings."
+    - label: "Minimal — required inputs only"
+      description: "Only tenancy, compartment, and region are required; everything else uses safe defaults."
+
+Question 2 — Schema features (multiSelect: true)
+  header: "Schema Features"
+  options:
+    - label: "Variable groups"
+      description: "Organise variables into collapsible sections matching the 7 infrastructure domains."
+    - label: "Help text and descriptions"
+      description: "Add title, description, and tooltip text to every surfaced variable."
+    - label: "Input validation rules"
+      description: "CIDR format regex, Kubernetes version pattern checks, and allowed-values constraints."
+    - label: "Conditional visibility"
+      description: "GPU fields visible only when a GPU shape is chosen; bastion fields only for private clusters."
+```
 
 ---
 
