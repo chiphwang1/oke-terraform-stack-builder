@@ -1,6 +1,6 @@
 # OKE Terraform Stack Builder
 
-A [Claude Code](https://claude.ai/claude-code) skill that guides you through designing and generating a production-ready **Oracle Kubernetes Engine (OKE)** Terraform stack and OCI Resource Manager (ORM) `schema.yaml`.
+A [Claude Code](https://claude.ai/claude-code) skill that guides you through designing and generating a complete **Oracle Kubernetes Engine (OKE)** Terraform stack and OCI Resource Manager (ORM) `schema.yaml`.
 
 ## What It Does
 
